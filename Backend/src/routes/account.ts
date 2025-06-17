@@ -47,6 +47,15 @@ router.post('/transfer', userMiddleware, async (req: Request, res: Response, nex
         const { amount, to } = req.body;
         const fromLastName = req.lastName;
 
+        const transferAmount = Number(amount);
+        if (isNaN(transferAmount)) {
+            await session.abortTransaction();
+            res.status(400).json({
+                message: "Invalid transfer amount"
+            });
+            return;
+        }
+
         if (!fromLastName) {
             await session.abortTransaction();
             res.status(401).json({
@@ -67,7 +76,7 @@ router.post('/transfer', userMiddleware, async (req: Request, res: Response, nex
             return;
         }
 
-        if (fromAccount.balance < amount) {
+        if (fromAccount.balance < transferAmount) {
             await session.abortTransaction();
             res.status(400).json({
                 message: "Insufficient balance for transfer"
@@ -87,21 +96,23 @@ router.post('/transfer', userMiddleware, async (req: Request, res: Response, nex
             return;
         }
 
-        const newFromBalance = fromAccount.balance - amount;
-        const newToBalance = toAccount.balance + amount;
+        const newFromBalance = Number(fromAccount.balance) - transferAmount;
+        const newToBalance = Number(toAccount.balance) + transferAmount;
 
         const [fromUpdate, toUpdate] = await Promise.all([
-            Bank.updateOne(
+            Bank.findOneAndUpdate(
                 { lastName: fromLastName },
-                { $set: { balance: newFromBalance } }
-            ).session(session),
-            Bank.updateOne(
+                { $set: { balance: newFromBalance } },
+                { new: true, session }
+            ),
+            Bank.findOneAndUpdate(
                 { lastName: to },
-                { $set: { balance: newToBalance } }
-            ).session(session)
+                { $set: { balance: newToBalance } },
+                { new: true, session }
+            )
         ]);
 
-        if (fromUpdate.modifiedCount === 0 || toUpdate.modifiedCount === 0) {
+        if (!fromUpdate || !toUpdate) {
             await session.abortTransaction();
             res.status(500).json({
                 message: "Transfer failed - please try again"

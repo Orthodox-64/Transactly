@@ -40,21 +40,13 @@ router.get('/balance', userMiddleware, async (req: Request, res: Response, next:
 });
 
 router.post('/transfer', userMiddleware, async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    const session = await mongoose.startSession();
-    
+    let session;
     try {
+        session = await mongoose.startSession();
         session.startTransaction();
+
         const { amount, to } = req.body;
         const fromLastName = req.lastName;
-
-        const transferAmount = Number(amount);
-        if (isNaN(transferAmount)) {
-            await session.abortTransaction();
-            res.status(400).json({
-                message: "Invalid transfer amount"
-            });
-            return;
-        }
 
         if (!fromLastName) {
             await session.abortTransaction();
@@ -64,14 +56,33 @@ router.post('/transfer', userMiddleware, async (req: Request, res: Response, nex
             return;
         }
 
-        const fromAccount = await Bank.findOne({
-            lastName: fromLastName
-        });
+        const transferAmount = Number(amount);
+        if (isNaN(transferAmount) || transferAmount <= 0) {
+            await session.abortTransaction();
+            res.status(400).json({
+                message: "Invalid transfer amount"
+            });
+            return;
+        }
 
-        if (!fromAccount || typeof fromAccount.balance !== 'number') {
+        // Find both accounts in parallel
+        const [fromAccount, toAccount] = await Promise.all([
+            Bank.findOne({ lastName: fromLastName }).session(session),
+            Bank.findOne({ lastName: to }).session(session)
+        ]);
+
+        if (!fromAccount) {
             await session.abortTransaction();
             res.status(404).json({
                 message: "Your bank account not found"
+            });
+            return;
+        }
+
+        if (!toAccount) {
+            await session.abortTransaction();
+            res.status(404).json({
+                message: "Recipient's account not found"
             });
             return;
         }
@@ -84,30 +95,16 @@ router.post('/transfer', userMiddleware, async (req: Request, res: Response, nex
             return;
         }
 
-        const toAccount = await Bank.findOne({
-            lastName: to
-        });
-
-        if (!toAccount || typeof toAccount.balance !== 'number') {
-            await session.abortTransaction();
-            res.status(404).json({
-                message: "Recipient's account not found"
-            });
-            return;
-        }
-
-        const newFromBalance = Number(fromAccount.balance) - transferAmount;
-        const newToBalance = Number(toAccount.balance) + transferAmount;
-
+        // Update both accounts in parallel
         const [fromUpdate, toUpdate] = await Promise.all([
             Bank.findOneAndUpdate(
                 { lastName: fromLastName },
-                { $set: { balance: newFromBalance } },
+                { $inc: { balance: -transferAmount } },
                 { new: true, session }
             ),
             Bank.findOneAndUpdate(
                 { lastName: to },
-                { $set: { balance: newToBalance } },
+                { $inc: { balance: transferAmount } },
                 { new: true, session }
             )
         ]);
@@ -123,17 +120,21 @@ router.post('/transfer', userMiddleware, async (req: Request, res: Response, nex
         await session.commitTransaction();
         res.json({
             message: "Transfer completed successfully",
-            fromBalance: newFromBalance,
-            toBalance: newToBalance
+            fromBalance: fromUpdate.balance,
+            toBalance: toUpdate.balance
         });
     } catch (error) {
-        await session.abortTransaction();
-        console.log("Error during transfer:", error);
+        if (session) {
+            await session.abortTransaction();
+        }
+        console.error("Error during transfer:", error);
         res.status(500).json({
             message: "Transfer failed - please try again"
         });
     } finally {
-        session.endSession();
+        if (session) {
+            session.endSession();
+        }
     }
 });
 
